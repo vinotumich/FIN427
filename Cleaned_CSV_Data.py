@@ -2,9 +2,8 @@ import os
 import numpy as np
 import pandas as pd
 
-# =========================
-# CONFIG (your path + file)
-# =========================
+# CONFIG (path + file)
+
 BASE_DIR = r"C:\Users\rsila\OneDrive\Desktop\UMich\FIN 427\FIN427"
 IN_FILE = "CSV_Dataset.csv"
 OUT_FILE = "CSV_Dataset_CLEANED.csv"
@@ -12,12 +11,10 @@ OUT_FILE = "CSV_Dataset_CLEANED.csv"
 in_path = os.path.join(BASE_DIR, IN_FILE)
 out_path = os.path.join(BASE_DIR, OUT_FILE)
 
-# =========================
-# SAFE MEMORY SETTINGS
-# =========================
-CHUNKSIZE = 300_000  # safe for large files
+# Memory Settings Safety
+CHUNKSIZE = 300_000  
 
-# FORCE DROP NWPERM by not reading it
+# Drop NWPERM by not reading it because missing throughout almost all of data
 usecols = ["PERMNO", "date", "TICKER", "COMNAM", "PERMCO", "CUSIP", "SHROUT"]
 
 dtype = {
@@ -29,7 +26,7 @@ dtype = {
     "SHROUT": "float64",
 }
 
-# Remove prior output if exists (prevents accidental appends)
+# Remove prior output if exists 
 if os.path.exists(out_path):
     os.remove(out_path)
 
@@ -83,10 +80,10 @@ for chunk in pd.read_csv(
     # (2) PERMNO not seen in previous chunks
     first_ever_mask = first_row_each_permno_in_chunk & (~chunk["PERMNO"].isin(seen_permno))
 
-    # Apply your desired first-observation behavior
+    # Apply first-observation behavior
     chunk.loc[first_ever_mask, "d_shrout"] = 0.0
-    chunk.loc[first_ever_mask, "ln_shrout_change"] = np.nan  # keep numeric column
-
+    chunk.loc[first_ever_mask, "ln_shrout_change"] = np.nan  
+    
     # Update seen_permno AFTER using it
     seen_permno.update(chunk.loc[first_row_each_permno_in_chunk, "PERMNO"].astype(int).tolist())
 
