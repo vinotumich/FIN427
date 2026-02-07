@@ -13,9 +13,12 @@ in_path = os.path.join(BASE_DIR, IN_FILE)
 out_path = os.path.join(BASE_DIR, OUT_FILE)
 
 # =========================
-# SAFE ON MEMORY SETTINGS
+# SAFE MEMORY SETTINGS
 # =========================
-CHUNKSIZE = 300_000  # conservative; lower if needed (e.g., 150_000)
+CHUNKSIZE = 300_000  # safe for large files
+
+# FORCE DROP NWPERM by not reading it
+usecols = ["PERMNO", "date", "TICKER", "COMNAM", "PERMCO", "CUSIP", "SHROUT"]
 
 dtype = {
     "PERMNO": "int32",
@@ -23,20 +26,19 @@ dtype = {
     "COMNAM": "string",
     "PERMCO": "int32",
     "CUSIP": "string",
-    "NWPERM": "float64",
     "SHROUT": "float64",
 }
 
-usecols = ["PERMNO", "date", "TICKER", "COMNAM", "PERMCO", "CUSIP", "NWPERM", "SHROUT"]
-
-# Remove prior output if it exists (prevents accidental appends)
+# Remove prior output if exists (prevents accidental appends)
 if os.path.exists(out_path):
     os.remove(out_path)
 
-# Carryover: last SHROUT per PERMNO across chunk boundaries
-last_shrout = {}
+# Carryover across chunks
+last_shrout = {}      # PERMNO -> last SHROUT seen (for cross-chunk lag)
+seen_permno = set()   # PERMNOs fully "introduced" in earlier chunks
 
 header_written = False
+chunk_num = 0
 
 for chunk in pd.read_csv(
     in_path,
@@ -46,50 +48,49 @@ for chunk in pd.read_csv(
     na_values=["", "NA", "NaN"],
     chunksize=CHUNKSIZE,
 ):
-    # ------------------------------------------------------------
-    # 1) Drop the placeholder lines with an empty ticker
-    # (These show up at the "start marker" for each PERMNO block)
-    # ------------------------------------------------------------
+    chunk_num += 1
+    print(f"Processing chunk {chunk_num}...")
+
+    # Drop placeholder rows where TICKER is blank/missing
     t = chunk["TICKER"]
     chunk = chunk[t.notna() & (t.str.len() > 0)].copy()
 
-    # Ensure SHROUT is numeric
+    # Ensure SHROUT numeric
     chunk["SHROUT"] = pd.to_numeric(chunk["SHROUT"], errors="coerce")
 
-    # ------------------------------------------------------------
-    # 2) Compute lag(SHROUT) within chunk
-    # ------------------------------------------------------------
+    # Lag within chunk
     chunk["SHROUT_LAG"] = chunk.groupby("PERMNO", sort=False)["SHROUT"].shift(1)
 
-    # ------------------------------------------------------------
-    # 3) Patch the first row per PERMNO in this chunk using carryover
-    # ------------------------------------------------------------
-    first_mask = ~chunk["PERMNO"].duplicated()
-    first_idx = chunk.index[first_mask]
+    # Patch first row per PERMNO in this chunk using carryover last_shrout
+    first_row_each_permno_in_chunk = ~chunk["PERMNO"].duplicated()
+    first_idx = chunk.index[first_row_each_permno_in_chunk]
 
     first_permnos = chunk.loc[first_idx, "PERMNO"].to_numpy()
     carry_lags = np.array([last_shrout.get(int(p), np.nan) for p in first_permnos], dtype="float64")
 
     current_lags = chunk.loc[first_idx, "SHROUT_LAG"].to_numpy(dtype="float64")
     patched_lags = np.where(np.isnan(current_lags), carry_lags, current_lags)
-
     chunk.loc[first_idx, "SHROUT_LAG"] = patched_lags
 
-    # ------------------------------------------------------------
-    # 4) New columns: absolute change + log change (log growth)
-    # ------------------------------------------------------------
+    # Compute changes
     chunk["d_shrout"] = chunk["SHROUT"] - chunk["SHROUT_LAG"]
 
     valid = (chunk["SHROUT"] > 0) & (chunk["SHROUT_LAG"] > 0)
-    chunk["ln_shrout_change"] = np.where(
-        valid,
-        np.log(chunk["SHROUT"] / chunk["SHROUT_LAG"]),
-        np.nan,
-    )
+    chunk["ln_shrout_change"] = np.where(valid, np.log(chunk["SHROUT"] / chunk["SHROUT_LAG"]), np.nan)
 
-    # ------------------------------------------------------------
-    # 5) Update carryover dict with last SHROUT per PERMNO in chunk
-    # ------------------------------------------------------------
+    # FIRST EVER observation per PERMNO in the ENTIRE FILE:
+    # (1) first row for that PERMNO within this chunk
+    # (2) PERMNO not seen in previous chunks
+    first_ever_mask = first_row_each_permno_in_chunk & (~chunk["PERMNO"].isin(seen_permno))
+
+    # Apply your desired first-observation behavior
+    chunk.loc[first_ever_mask, "d_shrout"] = 0.0
+    chunk.loc[first_ever_mask, "ln_shrout_change"] = np.nan  # keep numeric column
+
+    # Update seen_permno AFTER using it
+    seen_permno.update(chunk.loc[first_row_each_permno_in_chunk, "PERMNO"].astype(int).tolist())
+
+    # Update last_shrout for cross-chunk lags (use last row per PERMNO in the chunk)
     last_rows = chunk.groupby("PERMNO", sort=False).tail(1)
     for p, s in zip(last_rows["PERMNO"].to_numpy(), last_rows["SHROUT"].to_numpy()):
         last_shrout[int(p)] = s
@@ -97,10 +98,9 @@ for chunk in pd.read_csv(
     # Drop helper
     chunk = chunk.drop(columns=["SHROUT_LAG"])
 
-    # ------------------------------------------------------------
-    # 6) Write chunk to disk
-    # ------------------------------------------------------------
+    # Write output
     chunk.to_csv(out_path, mode="a", index=False, header=not header_written)
     header_written = True
 
-print(f"Done. Cleaned file saved to:\n{out_path}")
+print("\nDone.")
+print(f"Saved cleaned dataset to:\n{out_path}")
