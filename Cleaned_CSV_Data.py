@@ -2,8 +2,9 @@ import os
 import numpy as np
 import pandas as pd
 
+# =========================
 # CONFIG (path + file)
-
+# =========================
 BASE_DIR = r"C:\Users\rsila\OneDrive\Desktop\UMich\FIN 427\FIN427"
 IN_FILE = "CSV_Dataset.csv"
 OUT_FILE = "CSV_Dataset_CLEANED.csv"
@@ -11,10 +12,12 @@ OUT_FILE = "CSV_Dataset_CLEANED.csv"
 in_path = os.path.join(BASE_DIR, IN_FILE)
 out_path = os.path.join(BASE_DIR, OUT_FILE)
 
+# =========================
 # Memory Settings Safety
-CHUNKSIZE = 300_000  
+# =========================
+CHUNKSIZE = 300_000
 
-# Drop NWPERM by not reading it because missing throughout almost all of data
+# Drop NWPERM by not reading it
 usecols = ["PERMNO", "date", "TICKER", "COMNAM", "PERMCO", "CUSIP", "SHROUT"]
 
 dtype = {
@@ -26,13 +29,13 @@ dtype = {
     "SHROUT": "float64",
 }
 
-# Remove prior output if exists 
+# Remove prior output if exists (important because we append chunks)
 if os.path.exists(out_path):
     os.remove(out_path)
 
 # Carryover across chunks
 last_shrout = {}      # PERMNO -> last SHROUT seen (for cross-chunk lag)
-seen_permno = set()   # PERMNOs fully "introduced" in earlier chunks
+seen_permno = set()   # PERMNOs already encountered in earlier chunks
 
 header_written = False
 chunk_num = 0
@@ -54,6 +57,12 @@ for chunk in pd.read_csv(
 
     # Ensure SHROUT numeric
     chunk["SHROUT"] = pd.to_numeric(chunk["SHROUT"], errors="coerce")
+
+    # Ensure date is datetime (parse_dates already does this, but safe)
+    chunk["date"] = pd.to_datetime(chunk["date"], errors="coerce")
+
+    # Next month-end date (aligned with month-end convention)
+    chunk["next_date"] = chunk["date"] + pd.offsets.MonthEnd(1)
 
     # Lag within chunk
     chunk["SHROUT_LAG"] = chunk.groupby("PERMNO", sort=False)["SHROUT"].shift(1)
@@ -82,8 +91,8 @@ for chunk in pd.read_csv(
 
     # Apply first-observation behavior
     chunk.loc[first_ever_mask, "d_shrout"] = 0.0
-    chunk.loc[first_ever_mask, "ln_shrout_change"] = np.nan  
-    
+    chunk.loc[first_ever_mask, "ln_shrout_change"] = np.nan
+
     # Update seen_permno AFTER using it
     seen_permno.update(chunk.loc[first_row_each_permno_in_chunk, "PERMNO"].astype(int).tolist())
 
@@ -94,6 +103,26 @@ for chunk in pd.read_csv(
 
     # Drop helper
     chunk = chunk.drop(columns=["SHROUT_LAG"])
+
+    # =========================
+    # RENAME COLUMNS (to match your other script style)
+    # =========================
+    chunk = chunk.rename(columns={
+        "date": "month",
+        "next_date": "next_month",
+        "CUSIP": "cusip8",
+    })
+
+    # Ensure date columns are still datetime in-memory (CSV will save as YYYY-MM-DD)
+    chunk["month"] = pd.to_datetime(chunk["month"], errors="coerce")
+    chunk["next_month"] = pd.to_datetime(chunk["next_month"], errors="coerce")
+
+    # Reorder columns in output
+    desired_order = [
+        "PERMNO", "month", "next_month", "TICKER", "COMNAM", "PERMCO", "cusip8",
+        "SHROUT", "d_shrout", "ln_shrout_change"
+    ]
+    chunk = chunk[desired_order]
 
     # Write output
     chunk.to_csv(out_path, mode="a", index=False, header=not header_written)
