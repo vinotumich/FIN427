@@ -2,9 +2,8 @@ import os
 import numpy as np
 import pandas as pd
 
-# =========================
 # CONFIG (path + file)
-# =========================
+
 BASE_DIR = r"C:\Users\rsila\OneDrive\Desktop\UMich\FIN 427\FIN427"
 IN_FILE = "CSV_Dataset.csv"
 OUT_FILE = "CSV_Dataset_CLEANED.csv"
@@ -12,9 +11,7 @@ OUT_FILE = "CSV_Dataset_CLEANED.csv"
 in_path = os.path.join(BASE_DIR, IN_FILE)
 out_path = os.path.join(BASE_DIR, OUT_FILE)
 
-# =========================
 # Memory Settings Safety
-# =========================
 CHUNKSIZE = 300_000
 
 # Drop NWPERM by not reading it
@@ -78,18 +75,25 @@ for chunk in pd.read_csv(
     patched_lags = np.where(np.isnan(current_lags), carry_lags, current_lags)
     chunk.loc[first_idx, "SHROUT_LAG"] = patched_lags
 
-    # Compute changes
-    chunk["d_shrout"] = chunk["SHROUT"] - chunk["SHROUT_LAG"]
+    # ============================================================
+    # Compute raw monthly change
+    # ============================================================
+    chunk["d_shrout_raw"] = chunk["SHROUT"] - chunk["SHROUT_LAG"]
 
-    valid = (chunk["SHROUT"] > 0) & (chunk["SHROUT_LAG"] > 0)
-    chunk["ln_shrout_change"] = np.where(valid, np.log(chunk["SHROUT"] / chunk["SHROUT_LAG"]), np.nan)
+    # ============================================================
+    # ALLOCATE quarterly jump over current + prior 2 months
+    # If change happens at t, allocate (change/3) to t, t-1, t-2.
+    g = chunk.groupby("PERMNO", sort=False)["d_shrout_raw"]
+    chunk["d_shrout"] = (g.shift(0) + g.shift(-1) + g.shift(-2)) / 3.0
+
+    shrout_monthly = chunk["SHROUT_LAG"] + chunk["d_shrout"]
+    valid = (shrout_monthly > 0) & (chunk["SHROUT_LAG"] > 0)
+    chunk["ln_shrout_change"] = np.where(valid, np.log(shrout_monthly / chunk["SHROUT_LAG"]), np.nan)
 
     # FIRST EVER observation per PERMNO in the ENTIRE FILE:
-    # (1) first row for that PERMNO within this chunk
-    # (2) PERMNO not seen in previous chunks
     first_ever_mask = first_row_each_permno_in_chunk & (~chunk["PERMNO"].isin(seen_permno))
 
-    # Apply first-observation behavior
+    # Apply first-observation behavior (same as your original)
     chunk.loc[first_ever_mask, "d_shrout"] = 0.0
     chunk.loc[first_ever_mask, "ln_shrout_change"] = np.nan
 
@@ -101,12 +105,11 @@ for chunk in pd.read_csv(
     for p, s in zip(last_rows["PERMNO"].to_numpy(), last_rows["SHROUT"].to_numpy()):
         last_shrout[int(p)] = s
 
-    # Drop helper
-    chunk = chunk.drop(columns=["SHROUT_LAG"])
+    # Drop helpers
+    chunk = chunk.drop(columns=["SHROUT_LAG", "d_shrout_raw"])
 
-    # =========================
-    # RENAME COLUMNS (to match your other script style)
-    # =========================
+    # RENAME COLUMNS
+
     chunk = chunk.rename(columns={
         "date": "month",
         "next_date": "next_month",
